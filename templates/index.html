@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AeroVoyage — Global & All-India Weather & Travel Planner</title>
+
+  <!-- Google Fonts: Inter & Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Leaflet.js CSS (Interactive Map) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <!-- Top Navigation & Search Header -->
+  <header class="app-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <span class="brand-logo">🧭</span>
+        <div>
+          <h1 class="brand-title">AeroVoyage</h1>
+          <span class="brand-sub">Global & All-India Travel Weather Intelligence</span>
+        </div>
+      </div>
+
+      <!-- Autocomplete Search Bar -->
+      <div class="search-wrapper">
+        <form id="search-form" class="search-bar" autocomplete="off">
+          <span class="search-icon">🔍</span>
+          <input
+            type="text"
+            id="location-input"
+            placeholder="Search any Indian town or world city (e.g., Manali, Munnar, Pune, Tokyo)..."
+            aria-label="Search destination"
+          />
+          <button type="button" id="clear-search-btn" class="icon-btn hidden" title="Clear search">✕</button>
+          <button type="submit" class="primary-btn">Explore</button>
+        </form>
+        <div id="autocomplete-dropdown" class="autocomplete-dropdown hidden" role="listbox"></div>
+      </div>
+
+      <!-- Global Controls: Unit Toggle & Theme Toggle -->
+      <div class="header-controls">
+        <div class="unit-toggle" role="group" aria-label="Temperature Unit">
+          <button type="button" id="unit-c" class="unit-btn active" data-unit="C">°C</button>
+          <button type="button" id="unit-f" class="unit-btn" data-unit="F">°F</button>
+        </div>
+        <button type="button" id="theme-toggle" class="icon-pill-btn" title="Toggle Dark/Light Theme">
+          <span id="theme-icon">🌙</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick-Explore Curated Destination Chips -->
+    <div class="container quick-chips-bar">
+      <div class="chip-group">
+        <span class="chip-group-label">🇮🇳 India:</span>
+        <button class="dest-chip" data-name="Pune" data-admin1="Maharashtra" data-country="India" data-lat="18.5204" data-lon="73.8567" data-elev="560">Pune</button>
+        <button class="dest-chip" data-name="Manali" data-admin1="Himachal Pradesh" data-country="India" data-lat="32.2396" data-lon="77.1887" data-elev="2050">Manali</button>
+        <button class="dest-chip" data-name="Leh" data-admin1="Ladakh" data-country="India" data-lat="34.1526" data-lon="77.5771" data-elev="3500">Leh</button>
+        <button class="dest-chip" data-name="Munnar" data-admin1="Kerala" data-country="India" data-lat="10.0889" data-lon="77.0595" data-elev="1532">Munnar</button>
+        <button class="dest-chip" data-name="Jaipur" data-admin1="Rajasthan" data-country="India" data-lat="26.9124" data-lon="75.7873" data-elev="431">Jaipur</button>
+        <button class="dest-chip" data-name="Panaji" data-admin1="Goa" data-country="India" data-lat="15.4909" data-lon="73.8278" data-elev="7">Goa</button>
+        <button class="dest-chip" data-name="Shillong" data-admin1="Meghalaya" data-country="India" data-lat="25.5788" data-lon="91.8933" data-elev="1496">Shillong</button>
+        <button class="dest-chip" data-name="Rishikesh" data-admin1="Uttarakhand" data-country="India" data-lat="30.0869" data-lon="78.2676" data-elev="372">Rishikesh</button>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">🌍 Global:</span>
+        <button class="dest-chip" data-name="Tokyo" data-admin1="Tokyo" data-country="Japan" data-lat="35.6762" data-lon="139.6503" data-elev="40">Tokyo</button>
+        <button class="dest-chip" data-name="Paris" data-admin1="Île-de-France" data-country="France" data-lat="48.8566" data-lon="2.3522" data-elev="35">Paris</button>
+        <button class="dest-chip" data-name="Zermatt" data-admin1="Valais" data-country="Switzerland" data-lat="46.0207" data-lon="7.7491" data-elev="1620">Swiss Alps</button>
+        <button class="dest-chip" data-name="Ubud" data-admin1="Bali" data-country="Indonesia" data-lat="-8.5069" data-lon="115.2625" data-elev="200">Bali</button>
+        <button class="dest-chip" data-name="New York" data-admin1="New York" data-country="United States" data-lat="40.7128" data-lon="-74.0060" data-elev="10">New York</button>
+        <button class="dest-chip" data-name="Reykjavik" data-admin1="Capital Region" data-country="Iceland" data-lat="64.1466" data-lon="-21.9426" data-elev="15">Reykjavik</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container main-content">
+    <!-- Error / Alert Banner -->
+    <div id="error-banner" class="error-banner hidden" role="alert">
+      <span id="error-message">Unable to load destination data.</span>
+      <button type="button" id="dismiss-error-btn" class="icon-btn">✕</button>
+    </div>
+
+    <!-- Skeleton Loading State -->
+    <div id="skeleton-loader" class="skeleton-grid">
+      <div class="skeleton-box hero-skel"></div>
+      <div class="skeleton-row">
+        <div class="skeleton-box card-skel"></div>
+        <div class="skeleton-box card-skel"></div>
+      </div>
+    </div>
+
+    <!-- Main Dashboard Content -->
+    <div id="dashboard-content" class="hidden">
+      <!-- Dynamic Weather-Reactive Hero Banner -->
+      <section id="hero-banner" class="hero-banner theme-sunny">
+        <div class="hero-top">
+          <div>
+            <div class="location-meta">
+              <span id="hero-region" class="region-pill">Maharashtra, India</span>
+              <span id="hero-coords" class="coords-pill">18.52°N, 73.86°E • Elev 560m</span>
+            </div>
+            <h2 id="hero-city" class="hero-city">Pune</h2>
+            <p id="hero-condition" class="hero-condition">☀️ Clear Sky</p>
+          </div>
+
+          <div class="hero-actions">
+            <button type="button" id="add-compare-btn" class="glass-btn" title="Add to side-by-side comparison">
+              ⚖️ Compare
+            </button>
+            <button type="button" id="save-shortlist-btn" class="glass-btn" title="Save to Trip Shortlist">
+              🤍 Save Trip
+            </button>
+          </div>
+        </div>
+
+        <div class="hero-bottom">
+          <div class="temp-display">
+            <span id="hero-temp" class="main-temp">26°</span>
+            <div class="temp-sub">
+              <span>Feels like <strong id="hero-feels">25°</strong></span>
+              <span>Rain Chance <strong id="hero-precip">0%</strong></span>
+            </div>
+          </div>
+
+          <!-- Travel Readiness Score Gauge -->
+          <div class="readiness-card">
+            <div class="readiness-header">
+              <span>Travel Readiness</span>
+              <span id="travel-badge" class="status-badge optimal">Ideal for Sightseeing</span>
+            </div>
+            <div class="score-row">
+              <span id="travel-score" class="score-number">96</span>
+              <span class="score-max">/ 100</span>
+            </div>
+            <div class="progress-track">
+              <div id="travel-score-bar" class="progress-fill" style="width: 96%;"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Atmospheric Metrics Grid -->
+      <section class="metrics-grid" aria-label="Current Weather Metrics">
+        <div class="metric-card">
+          <span class="metric-label">💧 Humidity</span>
+          <strong id="metric-humidity" class="metric-value">--%</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">💨 Wind</span>
+          <strong id="metric-wind" class="metric-value">-- km/h</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">☀️ UV Index</span>
+          <strong id="metric-uv" class="metric-value">--</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">👁️ Visibility</span>
+          <strong id="metric-visibility" class="metric-value">-- km</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">🍃 Air Quality (US AQI)</span>
+          <strong id="metric-aqi" class="metric-value">--</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">🌅 Sunrise / Sunset</span>
+          <strong id="metric-sun" class="metric-value">-- / --</strong>
+        </div>
+      </section>
+
+      <!-- 2-Column Layout: Forecast & Chart + Map -->
+      <div class="dashboard-grid">
+        <!-- Left Column: Hourly Strip, 7-Day Forecast & Chart -->
+        <div class="grid-col-main">
+          <!-- 24-Hour Rolling Forecast -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>⏱️ Next 24 Hours</h3>
+              <span class="panel-sub">Hourly temperature & precipitation probability</span>
+            </div>
+            <div id="hourly-strip" class="hourly-strip"></div>
+          </section>
+
+          <!-- 7-Day Forecast Cards -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>📅 7-Day Destination Forecast</h3>
+              <span class="panel-sub">Daily highs, lows & rain likelihood</span>
+            </div>
+            <div id="daily-forecast-grid" class="daily-grid"></div>
+          </section>
+
+          <!-- Interactive Temperature & Rain Trend Chart -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>📈 7-Day Temperature & Precipitation Trend</h3>
+              <span class="panel-sub">Plan outdoor excursions around weather windows</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="forecast-chart"></canvas>
+            </div>
+          </section>
+        </div>
+
+        <!-- Right Column: Travel Advisory, Sightseeing, Packing & Map -->
+        <div class="grid-col-side">
+          <!-- Dynamic Activity & Sightseeing Recommendations -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>🗺️ Smart Sightseeing & Activity Guide</h3>
+              <span class="panel-sub">Tailored to real-time terrain & weather</span>
+            </div>
+            <div id="activities-list" class="activities-list"></div>
+          </section>
+
+          <!-- Auto-Generated Interactive Packing Checklist -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>🎒 Smart Packing Checklist</h3>
+              <span id="packing-progress" class="panel-badge">0/0 Packed</span>
+            </div>
+            <ul id="packing-checklist" class="packing-list"></ul>
+          </section>
+
+          <!-- Interactive Destination Map (Leaflet.js) -->
+          <section class="panel">
+            <div class="panel-header">
+              <h3>📍 Destination Terrain & Coordinates</h3>
+              <span id="map-coords-label" class="panel-sub">--</span>
+            </div>
+            <div id="destination-map" class="map-box"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Multi-Destination Side-by-Side Comparison & Saved Trip Shortlist -->
+      <div class="bottom-grid">
+        <!-- Side-by-Side Trip Comparison (Up to 3 Destinations) -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>⚖️ Side-by-Side Trip Comparison (Max 3)</h3>
+              <span class="panel-sub">Click "Compare" on any destination banner to evaluate options</span>
+            </div>
+            <button type="button" id="clear-compare-btn" class="text-btn">Clear All</button>
+          </div>
+          <div id="comparison-container" class="comparison-grid">
+            <p class="empty-state">No destinations added yet. Search Manali, Munnar, or Jaipur and click <strong>⚖️ Compare</strong>.</p>
+          </div>
+        </section>
+
+        <!-- Saved Trip Shortlist (localStorage) -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h3>🔖 Saved Trip Shortlist</h3>
+              <span class="panel-sub">Your bookmarked destinations stored locally</span>
+            </div>
+            <span id="shortlist-count" class="panel-badge">0 Saved</span>
+          </div>
+          <div id="shortlist-container" class="shortlist-list">
+            <p class="empty-state">Click <strong>🤍 Save Trip</strong> on any destination to build your shortlist.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div class="container">
+      <p>AeroVoyage Travel Weather Planner • Powered by Open-Meteo Global Geocoding, Forecast & Air Quality APIs</p>
+    </div>
+  </footer>
+
+  <!-- Chart.js & Leaflet.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <!-- Main Application Script -->
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
