@@ -1,19 +1,9 @@
-import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-import requests
 from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
 
-# Open-Meteo Endpoints (Zero API Key Required)
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
-
-REQUEST_TIMEOUT = 10
-
-# WMO Weather Interpretation Codes (WW) Mapping
 WMO_WEATHER_MAP: Dict[int, Dict[str, str]] = {
     0: {"label": "Clear Sky", "icon": "☀️", "theme": "sunny"},
     1: {"label": "Mainly Clear", "icon": "🌤️", "theme": "sunny"},
@@ -89,14 +79,9 @@ def evaluate_travel_intelligence(
     weather_code: int,
     elevation: float,
 ) -> Dict[str, Any]:
-    """
-    Calculates Travel Comfort Score (0-100), primary advisory badge,
-    dynamic sightseeing recommendations, and an auto-generated packing checklist.
-    """
     score = 100.0
     advisories: List[str] = []
 
-    # 1. Temperature Penalty & Classification (Ideal window: 16°C - 27°C)
     if temp_c > 35:
         score -= min(35, (temp_c - 30) * 3.0)
         advisories.append("Extreme Heat Advisory")
@@ -110,7 +95,6 @@ def evaluate_travel_intelligence(
         score -= (16 - temp_c) * 1.5
         advisories.append("Chilly Weather Prep")
 
-    # 2. Precipitation & Storm Penalty
     if weather_code in (95, 96, 99) or precip_prob >= 75:
         score -= 30
         advisories.append("Heavy Rain / Storm Alert")
@@ -120,20 +104,17 @@ def evaluate_travel_intelligence(
     elif precip_prob >= 20:
         score -= 6
 
-    # 3. Wind Speed Penalty (km/h)
     if wind_kmh >= 45:
         score -= 22
         advisories.append("High Wind Alert")
     elif wind_kmh >= 30:
         score -= 10
 
-    # 4. UV Index Penalty
     if uv_index >= 8:
         score -= 8
     elif uv_index >= 6:
         score -= 4
 
-    # 5. Air Quality Penalty
     if aqi is not None:
         if aqi > 150:
             score -= 20
@@ -143,7 +124,6 @@ def evaluate_travel_intelligence(
 
     final_score = max(10, min(100, int(round(score))))
 
-    # Primary Status Badge
     if not advisories:
         if final_score >= 80:
             primary_badge = "Ideal for Sightseeing"
@@ -153,12 +133,8 @@ def evaluate_travel_intelligence(
             badge_tone = "good"
     else:
         primary_badge = advisories[0]
-        if any(k in primary_badge for k in ["Storm", "Extreme", "High Wind", "Poor Air"]):
-            badge_tone = "danger"
-        else:
-            badge_tone = "warning"
+        badge_tone = "danger" if any(k in primary_badge for k in ["Storm", "Extreme", "High Wind", "Poor Air"]) else "warning"
 
-    # Dynamic Activity & Sightseeing Recommendations
     activities: List[Dict[str, str]] = []
     is_rainy_or_stormy = precip_prob >= 45 or weather_code in (61, 63, 65, 80, 81, 82, 95, 96, 99)
     is_snowy = weather_code in (71, 73, 75, 77, 85, 86) or temp_c <= 1
@@ -191,7 +167,6 @@ def evaluate_travel_intelligence(
             {"title": "Scenic Highway Road Trip / Sunset Cruise", "reason": "Smooth visibility and calm winds support open-air transit."},
         ])
 
-    # Smart Auto-Generated Packing Checklist
     packing_list: List[Dict[str, str]] = [
         {"id": "docs", "item": "ID / Passport, Digital Tickets & Offline Maps", "category": "Essentials"},
         {"id": "shoes", "item": "Comfortable Broken-In Walking Shoes", "category": "Footwear"},
@@ -251,99 +226,23 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/geocode")
-def geocode():
-    query = request.args.get("q", "").strip()
-    if len(query) < 2:
-        return jsonify({"results": []})
-
+@app.route("/api/process-weather", methods=["POST"])
+def process_weather():
+    """Processes raw Open-Meteo payloads fetched client-side to avoid shared-IP rate limits."""
     try:
-        resp = requests.get(
-            GEOCODING_URL,
-            params={"name": query, "count": 8, "language": "en", "format": "json"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        raw_results = data.get("results", [])
-
-        formatted = []
-        for item in raw_results:
-            formatted.append({
-                "id": item.get("id"),
-                "name": item.get("name"),
-                "admin1": item.get("admin1", ""),
-                "country": item.get("country", ""),
-                "country_code": item.get("country_code", ""),
-                "latitude": item.get("latitude"),
-                "longitude": item.get("longitude"),
-                "elevation": item.get("elevation", 0),
-                "timezone": item.get("timezone", "auto"),
-            })
-        return jsonify({"results": formatted})
-
-    except requests.Timeout:
-        return jsonify({"error": "Location service timed out. Please try again."}), 504
-    except requests.RequestException as exc:
-        return jsonify({"error": f"Geocoding failed: {str(exc)}"}), 502
-
-
-@app.route("/api/weather")
-def weather():
-    try:
-        lat = request.args.get("lat", type=float)
-        lon = request.args.get("lon", type=float)
-        name = request.args.get("name", "Selected Destination").strip()
-        admin1 = request.args.get("admin1", "").strip()
-        country = request.args.get("country", "").strip()
-        elevation_param = request.args.get("elevation", default=0.0, type=float)
-
-        if lat is None or lon is None:
-            return jsonify({"error": "Latitude and longitude are required."}), 400
-
-        forecast_params = {
-            "latitude": lat,
-            "longitude": lon,
-            "current": (
-                "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,"
-                "precipitation,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,visibility"
-            ),
-            "hourly": "temperature_2m,precipitation_probability,weather_code,uv_index",
-            "daily": (
-                "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,"
-                "sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max"
-            ),
-            "timezone": "auto",
-            "forecast_days": 7,
-        }
-
-        aq_params = {
-            "latitude": lat,
-            "longitude": lon,
-            "current": "us_aqi,pm2_5,pm10",
-            "timezone": "auto",
-        }
-
-        weather_resp = requests.get(FORECAST_URL, params=forecast_params, timeout=REQUEST_TIMEOUT)
-        weather_resp.raise_for_status()
-        w_data = weather_resp.json()
-
-        # Air Quality fetch (graceful non-blocking fallback if unavailable for remote coordinates)
-        us_aqi = None
-        pm2_5 = None
-        try:
-            aq_resp = requests.get(AIR_QUALITY_URL, params=aq_params, timeout=6)
-            if aq_resp.ok:
-                aq_current = aq_resp.json().get("current", {})
-                us_aqi = aq_current.get("us_aqi")
-                pm2_5 = aq_current.get("pm2_5")
-        except requests.RequestException:
-            pass
+        body = request.get_json(force=True)
+        loc = body.get("location", {})
+        w_data = body.get("weather", {})
+        aq_data = body.get("air_quality") or {}
 
         current = w_data.get("current", {})
         daily = w_data.get("daily", {})
         hourly = w_data.get("hourly", {})
-        elevation = w_data.get("elevation", elevation_param) or 0
+        elevation = w_data.get("elevation", loc.get("elevation", 0)) or 0
+
+        aq_current = aq_data.get("current", {})
+        us_aqi = aq_current.get("us_aqi")
+        pm2_5 = aq_current.get("pm2_5")
 
         code = int(current.get("weather_code", 0))
         is_day = int(current.get("is_day", 1))
@@ -364,7 +263,6 @@ def weather():
             elevation=float(elevation),
         )
 
-        # Format 7-day forecast
         daily_list = []
         dates = daily.get("time", [])
         for i, date_str in enumerate(dates):
@@ -387,7 +285,6 @@ def weather():
                 "sunset": daily["sunset"][i].split("T")[1] if "T" in daily["sunset"][i] else daily["sunset"][i],
             })
 
-        # Format next 24 hours from current local hour
         hourly_list = []
         h_times = hourly.get("time", [])
         current_time_str = current.get("time", "")
@@ -410,13 +307,13 @@ def weather():
                 "condition": h_decoded["label"],
             })
 
-        payload = {
+        return jsonify({
             "location": {
-                "name": name,
-                "admin1": admin1,
-                "country": country,
-                "latitude": lat,
-                "longitude": lon,
+                "name": loc.get("name", "Selected Destination"),
+                "admin1": loc.get("admin1", ""),
+                "country": loc.get("country", ""),
+                "latitude": float(loc.get("latitude", 0)),
+                "longitude": float(loc.get("longitude", 0)),
                 "elevation": round(elevation),
                 "timezone": w_data.get("timezone", ""),
             },
@@ -441,16 +338,10 @@ def weather():
             "daily": daily_list,
             "hourly": hourly_list,
             "travel": travel_intel,
-        }
-        return jsonify(payload)
-
-    except requests.Timeout:
-        return jsonify({"error": "Weather API request timed out. Please retry."}), 504
-    except requests.RequestException as exc:
-        return jsonify({"error": f"Unable to fetch weather data: {str(exc)}"}), 502
+        })
     except Exception as exc:
-        return jsonify({"error": f"Unexpected server error: {str(exc)}"}), 500
+        return jsonify({"error": f"Failed to process weather intelligence: {str(exc)}"}), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5001)

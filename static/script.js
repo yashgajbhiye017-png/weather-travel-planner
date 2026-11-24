@@ -1,5 +1,8 @@
 (() => {
-  // Application State
+  const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
+  const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+  const AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality";
+
   const state = {
     unit: localStorage.getItem("av_unit") || "C",
     theme: localStorage.getItem("av_theme") || "light",
@@ -7,12 +10,12 @@
     comparisonList: JSON.parse(localStorage.getItem("av_compare") || "[]"),
     shortlist: JSON.parse(localStorage.getItem("av_shortlist") || "[]"),
     packedState: JSON.parse(localStorage.getItem("av_packed") || "{}"),
+    cache: {},
     chartInstance: null,
     mapInstance: null,
     mapMarker: null,
   };
 
-  // DOM References
   const dom = {
     html: document.documentElement,
     searchForm: document.getElementById("search-form"),
@@ -59,7 +62,6 @@
     shortlistCount: document.getElementById("shortlist-count"),
   };
 
-  // Temperature Conversion Helper
   function formatTemp(tempC, showUnit = false) {
     if (tempC === null || tempC === undefined) return "--";
     const val = state.unit === "F" ? (tempC * 9) / 5 + 32 : tempC;
@@ -97,29 +99,77 @@
     dom.errorBanner.classList.add("hidden");
   }
 
-  // Fetch Weather Data from Flask Backend
+  // Fetch Open-Meteo directly from client browser (personal IP) + process in Python
   async function loadDestinationWeather(loc) {
     hideError();
+    const cacheKey = `${Number(loc.latitude).toFixed(2)}_${Number(loc.longitude).toFixed(2)}`;
+    if (state.cache[cacheKey] && Date.now() - state.cache[cacheKey].ts < 10 * 60 * 1000) {
+      state.currentData = state.cache[cacheKey].data;
+      dom.skeletonLoader.classList.add("hidden");
+      dom.dashboardContent.classList.remove("hidden");
+      renderDashboard(state.currentData);
+      return;
+    }
+
     dom.skeletonLoader.classList.remove("hidden");
     dom.dashboardContent.classList.add("hidden");
 
-    const params = new URLSearchParams({
-      lat: loc.latitude,
-      lon: loc.longitude,
-      name: loc.name,
-      admin1: loc.admin1 || "",
-      country: loc.country || "",
-      elevation: loc.elevation || 0,
+    const weatherParams = new URLSearchParams({
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      current: "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,visibility",
+      hourly: "temperature_2m,precipitation_probability,weather_code,uv_index",
+      daily: "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max",
+      timezone: "auto",
+      forecast_days: 7,
+    });
+
+    const aqParams = new URLSearchParams({
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      current: "us_aqi,pm2_5,pm10",
+      timezone: "auto",
     });
 
     try {
-      const response = await fetch(`/api/weather?${params.toString()}`);
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to retrieve destination weather.");
+      // Sequential fetch avoids Open-Meteo's strict 1-concurrent-request limit per IP
+      const weatherResp = await fetch(`${FORECAST_URL}?${weatherParams.toString()}`);
+      if (!weatherResp.ok) {
+        if (weatherResp.status === 429) {
+          throw new Error("Open-Meteo rate limit reached on your network. Wait 10 seconds and retry.");
+        }
+        throw new Error(`Weather service returned HTTP ${weatherResp.status}`);
       }
-      state.currentData = data;
-      renderDashboard(data);
+      const weatherJson = await weatherResp.json();
+
+      let aqJson = null;
+      try {
+        const aqResp = await fetch(`${AIR_QUALITY_URL}?${aqParams.toString()}`);
+        if (aqResp.ok) {
+          aqJson = await aqResp.json();
+        }
+      } catch (_) {
+        // Optional AQI metric; continue if unavailable
+      }
+
+      const processResp = await fetch("/api/process-weather", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          location: loc,
+          weather: weatherJson,
+          air_quality: aqJson,
+        }),
+      });
+
+      const processedData = await processResp.json();
+      if (!processResp.ok) {
+        throw new Error(processedData.error || "Failed to compute travel readiness.");
+      }
+
+      state.cache[cacheKey] = { ts: Date.now(), data: processedData };
+      state.currentData = processedData;
+      renderDashboard(processedData);
     } catch (err) {
       showError(err.message);
     } finally {
@@ -130,11 +180,9 @@
     }
   }
 
-  // Render Complete Dashboard
   function renderDashboard(data) {
     const { location, current, daily, hourly, travel } = data;
 
-    // Hero Banner & Theme
     dom.heroBanner.className = `hero-banner theme-${current.theme}`;
     const regionParts = [location.admin1, location.country].filter(Boolean);
     dom.heroRegion.textContent = regionParts.join(", ") || "Global Destination";
@@ -145,19 +193,16 @@
     dom.heroFeels.textContent = formatTemp(current.feels_like_c, true);
     dom.heroPrecip.textContent = `${current.precip_prob}%`;
 
-    // Travel Readiness Gauge
     dom.travelBadge.textContent = travel.badge;
     dom.travelBadge.className = `status-badge ${travel.badge_tone}`;
     dom.travelScore.textContent = travel.score;
     dom.travelScoreBar.style.width = `${travel.score}%`;
 
-    // Save Button State
     const isSaved = state.shortlist.some(
       (item) => item.name === location.name && Math.abs(item.latitude - location.latitude) < 0.05
     );
     dom.saveShortlistBtn.textContent = isSaved ? "❤️ Saved" : "🤍 Save Trip";
 
-    // Metrics
     dom.metricHumidity.textContent = `${current.humidity}%`;
     dom.metricWind.textContent = `${Math.round(current.wind_speed)} km/h (${current.wind_dir})`;
     dom.metricUv.textContent = `${current.uv_index}`;
@@ -165,7 +210,6 @@
     dom.metricAqi.textContent = `${current.aqi.value} (${current.aqi.category})`;
     dom.metricSun.textContent = `${current.sunrise} / ${current.sunset}`;
 
-    // Hourly Strip
     dom.hourlyStrip.innerHTML = hourly
       .map(
         (h) => `
@@ -179,7 +223,6 @@
       )
       .join("");
 
-    // 7-Day Forecast Cards
     dom.dailyForecastGrid.innerHTML = daily
       .map(
         (d) => `
@@ -194,7 +237,6 @@
       )
       .join("");
 
-    // Sightseeing & Activities
     dom.activitiesList.innerHTML = travel.activities
       .map(
         (act) => `
@@ -206,15 +248,11 @@
       )
       .join("");
 
-    // Packing Checklist
     renderPackingChecklist(location.name, travel.packing_list);
-
-    // Chart & Map
     renderForecastChart(daily);
     renderMap(location);
   }
 
-  // Interactive Packing Checklist
   function renderPackingChecklist(cityName, items) {
     const cityKey = cityName.toLowerCase();
     const cityPacked = state.packedState[cityKey] || {};
@@ -257,7 +295,6 @@
     updateCount();
   }
 
-  // Chart.js Temperature & Precipitation Chart
   function renderForecastChart(daily) {
     const ctx = document.getElementById("forecast-chart").getContext("2d");
     if (state.chartInstance) {
@@ -341,7 +378,6 @@
     });
   }
 
-  // Leaflet.js Interactive Map
   function renderMap(location) {
     dom.mapCoordsLabel.textContent = `${location.latitude.toFixed(4)}°N, ${location.longitude.toFixed(4)}°E`;
 
@@ -363,7 +399,6 @@
     setTimeout(() => state.mapInstance.invalidateSize(), 150);
   }
 
-  // Side-by-Side Trip Comparison
   function addToComparison() {
     if (!state.currentData) return;
     const { location, current, travel } = state.currentData;
@@ -433,7 +468,6 @@
     });
   }
 
-  // Saved Trip Shortlist
   function toggleShortlist() {
     if (!state.currentData) return;
     const { location, current } = state.currentData;
@@ -500,7 +534,6 @@
     });
   }
 
-  // Autocomplete Search with Debounce
   let debounceTimer = null;
   async function fetchAutocomplete(query) {
     if (query.trim().length < 2) {
@@ -509,9 +542,10 @@
     }
 
     try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+      const params = new URLSearchParams({ name: query.trim(), count: 8, language: "en", format: "json" });
+      const res = await fetch(`${GEOCODING_URL}?${params.toString()}`);
+      if (!res.ok) throw new Error("Location lookup busy. Try again.");
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Search error");
 
       const results = data.results || [];
       if (results.length === 0) {
@@ -542,7 +576,7 @@
         itemEl.addEventListener("click", () => {
           const idx = Number(itemEl.getAttribute("data-res-idx"));
           const chosen = results[idx];
-          dom.locationInput.value = `${chosen.name}, ${chosen.country}`;
+          dom.locationInput.value = `${chosen.name}, ${chosen.country || ""}`;
           dom.autocompleteDropdown.classList.add("hidden");
           loadDestinationWeather(chosen);
         });
@@ -554,12 +588,11 @@
     }
   }
 
-  // Event Listeners
   dom.locationInput.addEventListener("input", (e) => {
     const val = e.target.value;
     dom.clearSearchBtn.classList.toggle("hidden", val.length === 0);
     clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => fetchAutocomplete(val), 280);
+    debounceTimer = setTimeout(() => fetchAutocomplete(val), 320);
   });
 
   dom.clearSearchBtn.addEventListener("click", () => {
@@ -578,14 +611,15 @@
     }
     dom.autocompleteDropdown.classList.add("hidden");
     try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const params = new URLSearchParams({ name: q, count: 1, language: "en", format: "json" });
+      const res = await fetch(`${GEOCODING_URL}?${params.toString()}`);
       const data = await res.json();
       if (!data.results || data.results.length === 0) {
         showError(`Could not find "${q}". Try another town or check spelling.`);
         return;
       }
       loadDestinationWeather(data.results[0]);
-    } catch (err) {
+    } catch (_) {
       showError("Network error while searching location.");
     }
   });
@@ -623,7 +657,6 @@
   });
   dom.saveShortlistBtn.addEventListener("click", toggleShortlist);
 
-  // Initialize App State & Default Load (Pune, India)
   applyTheme(state.theme);
   dom.unitC.classList.toggle("active", state.unit === "C");
   dom.unitF.classList.toggle("active", state.unit === "F");
